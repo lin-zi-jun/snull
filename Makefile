@@ -26,5 +26,9 @@ PWD       := $(shell pwd)
 
 default:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) modules
+	cp snull.ko /home/linzijun/tftpboot
+#	gcc client.c -o client
+#	arm-linux-gnueabihf-gcc server.c -o server
+#	cp client server /home/linzijun/tftpboot
 
 endif

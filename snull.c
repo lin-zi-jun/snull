@@ -48,13 +48,15 @@ static int lockup = 0;
 module_param(lockup, int, 0);
  
 static int timeout = SNULL_TIMEOUT;
-module_param(timeout, int, 0);
+module_param(timeout, int, 0);		//看门狗时间
  
 /*
  * Do we run in NAPI mode?
  */
 static int use_napi = 0;
-module_param(use_napi, int, 0);
+module_param(use_napi, int, 0);				//默认不适用NAPI
+ 
+#define PRINTK 1 
  
     
 /*
@@ -73,7 +75,7 @@ struct snull_packet {         //虚拟网卡包
     u8 data[ETH_DATA_LEN];
 };
  
-int pool_size = 8;
+int pool_size = 8;	 //池链表长度	
 module_param(pool_size, int, 0);
  
 /*
@@ -85,7 +87,7 @@ struct snull_priv {			//虚拟网卡私有数据
     struct net_device_stats stats;
     int status;
     struct snull_packet *ppool;
-    struct snull_packet *rx_queue;  	//该链表有4个成员
+    struct snull_packet *rx_queue;  	//该链表有4个成员   net_device *dev;  datalen;  data[ETH_DATA_LEN];
     int rx_int_enabled;
     int tx_packetlen;
     u8 *tx_packetdata;
@@ -106,7 +108,7 @@ void snull_setup_pool(struct net_device *dev)  		//分配内存空间
     int i;
     struct snull_packet *pkt;
  
-    priv->ppool = NULL;
+    priv->ppool = NULL; 
     for (i = 0; i < pool_size; i++) {
         pkt = kmalloc (sizeof (struct snull_packet), GFP_KERNEL);
         if (pkt == NULL) {
@@ -172,7 +174,7 @@ void snull_enqueue_buf(struct net_device *dev, struct snull_packet *pkt)  //
  
     spin_lock_irqsave(&priv->lock, flags);
     pkt->next = priv->rx_queue;  /* FIXME - misorders packets */
-    priv->rx_queue = pkt;
+    priv->rx_queue = pkt;      
     spin_unlock_irqrestore(&priv->lock, flags);
 }
  
@@ -204,7 +206,7 @@ static void snull_rx_ints(struct net_device *dev, int enable)			//使能或失�
  * Open and close
  */
  
-int snull_open(struct net_device *dev)					//开启一个虚拟网卡
+int snull_open(struct net_device *dev)					//@开启一个虚拟网卡
 {
     struct snull_priv *priv = netdev_priv(dev);
     /* request_region(), request_irq(), ....  (like fops->open) */
@@ -224,10 +226,16 @@ int snull_open(struct net_device *dev)					//开启一个虚拟网卡
     if (dev == snull_devs[1])
         dev->dev_addr[ETH_ALEN-1]++; /* \0SNUL1 */
     netif_start_queue(dev);
+	
+#if PRINTK
+	printk("PRINTK--->snull_open -> netif_start_queue\n");
+#endif	
+
+	
     return 0;
 }
  
-int snull_release(struct net_device *dev)				//关闭一个虚拟网卡
+int snull_release(struct net_device *dev)				//@关闭一个虚拟网卡
 {
     struct snull_priv *priv = netdev_priv(dev);
     /* release ports, irq and such -- like fops->close */
@@ -237,8 +245,13 @@ int snull_release(struct net_device *dev)				//关闭一个虚拟网卡
         napi_disable(&priv->napi);
     }
     netif_stop_queue(dev); /* can't transmit any more */
+#if PRINTK
+	printk("PRINTK--->snull_release -> netif_stop_queue\n");
+#endif	
+	
     return 0;
 }
+
  
 /*
  * Configuration changes (passed on by ifconfig)
@@ -267,7 +280,7 @@ int snull_config(struct net_device *dev, struct ifmap *map)
 /*
  * Receive a packet: retrieve, encapsulate and pass over to upper levels
  */
-void snull_rx(struct net_device *dev, struct snull_packet *pkt)
+void snull_rx(struct net_device *dev, struct snull_packet *pkt)				//接收一个数据包  在常规中断接收调用    snull_regular_interrupt-> snull_rx-> netif_rx
 {
     struct sk_buff *skb;
     struct snull_priv *priv = netdev_priv(dev);
@@ -288,11 +301,14 @@ void snull_rx(struct net_device *dev, struct snull_packet *pkt)
  
     /* Write metadata, and then pass to the receive level */
     skb->dev = dev;
-    skb->protocol = eth_type_trans(skb, dev);						//返回以太网类型
+    skb->protocol = eth_type_trans(skb, dev);						//获取以太网类型
     skb->ip_summed = CHECKSUM_UNNECESSARY; /* don't check it */    //不检查校验和
-    priv->stats.rx_packets++;
-    priv->stats.rx_bytes += pkt->datalen;
-    netif_rx(skb);
+    priv->stats.rx_packets++;				//接收的包和
+    priv->stats.rx_bytes += pkt->datalen;		//接收的字节数和
+	
+//	printk("netif_rx:%s\n",skb->data);
+    netif_rx(skb);    //将数据包放到各CPU等待队列中，软中断后供net_rx_action调用
+	
   out:
     return;
 }
@@ -333,7 +349,7 @@ static int snull_poll(struct napi_struct *napi, int budget)
         snull_release_buffer(pkt);
     }
     /* If we processed all packets, we're done; tell the kernel and reenable ints */
-    if (! priv->rx_queue) {
+    if (! priv->rx_queue) {				//如果队列开启，使能接收中断
         __napi_complete(napi);
         snull_rx_ints(napi->dev, 1);
         return 0;
@@ -346,7 +362,7 @@ static int snull_poll(struct napi_struct *napi, int budget)
 /*
  * The typical interrupt entry point
  */
-static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)										//3.2.naip=0 默认注册  ，接收发送数据
+static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)       //不通过NAPI发送接收中断函数												//3.2.naip=0 默认注册  ，接收发送数据
 {
     int statusword;
     struct snull_priv *priv;		//主要事件：1：获取状态标志字； 2：获取数据表链表。
@@ -370,19 +386,33 @@ static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
     /* retrieve statusword: real netdevices use I/O instructions */
     statusword = priv->status;
 	
-    priv->status = 0;		//状态字清零，防止下一次再进入
+#if PRINTK
+	// printk("PRINTK--->R:%X  T:%X statusword:%X\n",SNULL_RX_INTR,SNULL_TX_INTR,statusword);
+#endif		
+	
+	
+    priv->status = 0;		//状态字清零，防止下一次再进入 ？
     if (statusword & SNULL_RX_INTR) {			//若发生接收中断
         /* send it to snull_rx for handling */
         pkt = priv->rx_queue;					//获取该设备数据
         if (pkt) {
             priv->rx_queue = pkt->next;			//指向下一个数据节点，相当于清空接收链表
             snull_rx(dev, pkt);					//进行接收操作
+			
+#if PRINTK
+	// printk("PRINTK--->SNULL_RX_INTR:\n");
+#endif	
+			
         }
     }
-    if (statusword & SNULL_TX_INTR) {
+	
+    if (statusword & SNULL_TX_INTR) {			//若发生发送中断
         /* a transmission is over: free the skb */
         priv->stats.tx_packets++;
         priv->stats.tx_bytes += priv->tx_packetlen;
+#if PRINTK
+	// printk("PRINTK--->SNULL_TX_INTR:\n");
+#endif
         dev_kfree_skb(priv->skb);
     }
  
@@ -419,7 +449,7 @@ static void snull_regular_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 //问题：该函数并没有涉及到接收和发送的过程。	
  
-static void snull_napi_interrupt(int irq, void *dev_id, struct pt_regs *regs)			
+static void snull_napi_interrupt(int irq, void *dev_id, struct pt_regs *regs)		   //->	napi_schedule
 {
     int statusword;
     struct snull_priv *priv;			//定义一个私有数据域，这里主要用来获取网络设备驱动的私有数据中的状态字
@@ -523,7 +553,8 @@ static void snull_hw_tx(char *buf, int len, struct net_device *dev)										//4
     tx_buffer->datalen = len;
     memcpy(tx_buffer->data, buf, len);
     snull_enqueue_buf(dest, tx_buffer);
-    if (priv->rx_int_enabled) {
+	
+    if (priv->rx_int_enabled) {					//接收中断使能
         priv->status |= SNULL_RX_INTR;
         snull_interrupt(0, dest, NULL);
     }
@@ -551,26 +582,32 @@ static void snull_hw_tx(char *buf, int len, struct net_device *dev)										//4
  */
 int snull_tx(struct sk_buff *skb, struct net_device *dev)				//5.调用内核传输一个包
 {
-    int len;
-    char *data, shortpkt[ETH_ZLEN];
-    struct snull_priv *priv = netdev_priv(dev);
+    // int len;
+    // char *data, shortpkt[ETH_ZLEN];
+    // struct snull_priv *priv = netdev_priv(dev);
  
-    data = skb->data;
-    len = skb->len;
+    // data = skb->data;
+    // len = skb->len;
 	
-    if (len < ETH_ZLEN) {
-        memset(shortpkt, 0, ETH_ZLEN);
-        memcpy(shortpkt, skb->data, skb->len);
-        len = ETH_ZLEN;
-        data = shortpkt;
-    }
-    dev->trans_start = jiffies; /* save the timestamp */
+// #if PRINTK
+		 // printk("PRINTK--->len:%d\n",len);
+// #endif	
+	
+	
+    // if (len < ETH_ZLEN) {
+        // memset(shortpkt, 0, ETH_ZLEN);
+        // memcpy(shortpkt, skb->data, skb->len);
+        // len = ETH_ZLEN;
+        // data = shortpkt;
+    // }
+    // dev->trans_start = jiffies; /* save the timestamp */
  
-    /* Remember the skb, so we can free it at interrupt time */
-    priv->skb = skb;
+    // /* Remember the skb, so we can free it at interrupt time */
+    // priv->skb = skb;
  
-    /* actual deliver of data is device-specific, and not shown here */
-    snull_hw_tx(data, len, dev);
+    // // /* actual deliver of data is device-specific, and not shown here */
+      // snull_hw_tx(data, len, dev);
+	
  
     return 0; /* Our simple device can not fail */
 }
@@ -578,11 +615,16 @@ int snull_tx(struct sk_buff *skb, struct net_device *dev)				//5.调用内核传
 /*
  * Deal with a transmit timeout.
  */
-void snull_tx_timeout (struct net_device *dev)
+void snull_tx_timeout (struct net_device *dev)							//超时唤醒
 {
     struct snull_priv *priv = netdev_priv(dev);
     PDEBUG("Transmit timeout at %ld, latency %ld\n", jiffies,
             jiffies - dev->trans_start);
+			
+#if PRINTK
+		 printk("PRINTK--->snull_tx_timeout\n");
+#endif				
+			
     /* Simulate a transmission interrupt to get things moving */
     priv->status = SNULL_TX_INTR;
     snull_interrupt(0, dev, NULL);
@@ -639,7 +681,7 @@ int snull_header(struct sk_buff *skb, struct net_device *dev,			//第一个参�
 }
  
  
-int snull_change_mtu(struct net_device *dev, int new_mtu)			//设置mtu值
+int snull_change_mtu(struct net_device *dev, int new_mtu)			//@设置mtu值
 {
     unsigned long flags;
     struct snull_priv *priv = netdev_priv(dev);
@@ -653,6 +695,11 @@ int snull_change_mtu(struct net_device *dev, int new_mtu)			//设置mtu值
      */
     spin_lock_irqsave(lock, flags);
     dev->mtu = new_mtu;
+	
+#if PRINTK
+	printk("PRINTK--->new_mtu:%d\n",new_mtu);
+#endif	
+
     spin_unlock_irqrestore(lock, flags);
     return 0; /* success */
 }
@@ -663,12 +710,12 @@ static struct header_ops header_devops =
     .rebuild  = snull_rebuild_header,
 };
  
-static struct net_device_ops net_devops =
+static struct net_device_ops net_devops =		//操作方法集，向上提供接口，向下操作硬件
 {
     .ndo_open            = snull_open,
     .ndo_stop            = snull_release,
     .ndo_set_config      = snull_config,
-    .ndo_start_xmit      = snull_tx,								//5555
+    .ndo_start_xmit      = snull_tx,			//驱动功能层，是网络设备接口层net_device数据结构的具体成员，启动发送      ->snull_hw_tx ->snull_enqueue_buf
     .ndo_do_ioctl        = snull_ioctl,
     .ndo_get_stats       = snull_stats,
     .ndo_change_mtu      = snull_change_mtu,  
@@ -676,49 +723,30 @@ static struct net_device_ops net_devops =
 };
  
 /*
+
  * The init function (sometimes called probe).
  * It is invoked by register_netdev()
  */
 void snull_init(struct net_device *dev)										//6.虚拟网卡初始化
 {
-    struct snull_priv *priv;			//定义虚拟私有结构体
-    /*
-     * Make the usual checks: check_region(), probe irq, ...  -ENODEV
-     * should be returned if no device found.  No resource should be
-     * grabbed: this is done on open(). 
-     */
- 
-    /* 
-     * Then, assign other fields in dev, using ether_setup() and some
-     * hand assignments
-     */
+    struct snull_priv *priv;												//定义虚拟私有结构体
     ether_setup(dev); /* assign some of the fields */						//在结构体net_device中某些参数默认分配字段				
     
     dev->header_ops = &header_devops;										//主要涉及到create -->header_devops   rebuild-->snull_rebuild_header
     dev->netdev_ops = &net_devops;											
     dev->watchdog_timeo = timeout;
  
-    priv = netdev_priv(dev);				//函数netdev_priv直接返回了net_device结构末端地址，也就是网卡私有数据结构的起始地址
-//	dev->priv指针被赋为netdev_priv返回的值，也就是说，加入我们要通过net_device获得我们自定义的device结构的指针时，可以使用netdev_priv（dev），
-//	当然也可以直接使用dev->priv。而一般推荐我们使用netdev_priv，而不使用后者，不知为何。按照现在代码来看，priv指针完全可以不需要，而只需要使用netdev_priv，
-//	我想推荐我们使用netdev_priv这个内联函数的原因可能是以后这个字段会被取消，当然我只是猜测！
+    priv = netdev_priv(dev);				
 	
     memset(priv, 0, sizeof(struct snull_priv));
  
     if (use_napi) {
-        netif_napi_add(dev, &priv->napi, snull_poll, 2);
+        netif_napi_add(dev, &priv->napi, snull_poll, 2);    //添加一个poll  2：指的是权重
     }
-    /* keep the default flags, just add NOARP */
     dev->flags           |= IFF_NOARP;
-//    dev->features        |= NETIF_F_NO_CSUM;
- 
-    /*
-     * Then, initialize the priv field. This encloses the statistics
-     * and a few private fields.
-     */
- 
+
     spin_lock_init(&priv->lock);
-    snull_rx_ints(dev, 1);        /* enable receive interrupts */
+     snull_rx_ints(dev, 1); 				//使能接收中断      
     snull_setup_pool(dev);
 }
  
@@ -751,20 +779,28 @@ void snull_cleanup(void)				//卸载驱动
 int snull_init_module(void)									
 {
     int result, i, ret = -ENOMEM;
-    snull_interrupt = use_napi ? snull_napi_interrupt : snull_regular_interrupt;		//4.配置获取   if(a) { return b;} else { return c;}  
-    //5.当需要分配一块似有的dev数据结构时，linux内核帮我们一次性就把net_device结构跟自己似有的内容一并分配了，省事省力，也灵活了！
-    snull_devs[0] = alloc_netdev(sizeof(struct snull_priv), "linzijun%d",	snull_init);			//5.分配内存
-    snull_devs[1] = alloc_netdev(sizeof(struct snull_priv), "linzijun%d", snull_init);
+    snull_interrupt = use_napi ? snull_napi_interrupt : snull_regular_interrupt;
+    snull_devs[0] = alloc_netdev(sizeof(struct snull_priv), "linzijun-%d", snull_init);			
+    snull_devs[1] = alloc_netdev(sizeof(struct snull_priv), "linzijun-%d", snull_init);
            
     if (snull_devs[0] == NULL || snull_devs[1] == NULL)
         goto out;
+	else
     ret = -ENODEV;
+	
     for (i = 0; i < 2;  i++)
         if ((result = register_netdev(snull_devs[i])))							//注册网络设备，参数为struct net_device,
             PDEBUG("snull: error %i registering device \"%s\"\n",result, snull_devs[i]->name);
         else{
 				ret = 0;
 			}
+			
+		
+	if(use_napi==1)
+	{
+		printk("use naip.\n");
+	}
+			
    out:
     if (ret) 
         snull_cleanup();		//如果内存分配失败，则注销网络设备
